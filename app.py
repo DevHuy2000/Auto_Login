@@ -13,7 +13,7 @@ from datetime import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"))
 app.config['SECRET_KEY'] = 'freefire-secret-key-2024'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
@@ -273,7 +273,13 @@ def delete_token():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        return render_template("index.html")
+    except Exception as e:
+        import traceback
+        return f"<pre>{traceback.format_exc()}</pre>", 500
+
+
 
 @app.route('/api/token', methods=['GET'])
 def get_token():
@@ -322,7 +328,7 @@ def on_disconnect():
         del active_sessions[sid]
 
 if __name__ == '__main__':
-    from waitress import serve
+    
     port = int(os.environ.get('PORT', 5000))
-    print(f"Starting server on port {port}")
-    serve(app, host='0.0.0.0', port=port, threads=4)
+
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
