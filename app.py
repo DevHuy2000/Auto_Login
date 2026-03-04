@@ -1,5 +1,3 @@
-from gevent import monkey
-monkey.patch_all()
 
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
@@ -18,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'freefire-secret-key-2024'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 FREEFIRE_VERSION = "OB52"
 AES_KEY = bytes([89,103,38,116,99,37,68,69,117,104,54,37,90,99,94,56])
