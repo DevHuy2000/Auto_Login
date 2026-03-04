@@ -1,4 +1,3 @@
-
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 import threading
@@ -24,10 +23,8 @@ AES_IV  = bytes([54,111,121,90,68,114,50,50,69,51,121,99,104,106,77,37])
 
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_token.txt")
 
-# Active sessions: sid -> stop_event
 active_sessions = {}
 
-# ── AES
 def aes_encrypt(data: bytes, key=AES_KEY, iv=AES_IV) -> bytes:
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return cipher.encrypt(pad(data, AES.block_size))
@@ -106,6 +103,7 @@ def major_login(open_id, access_token, platform):
 def _parse_proto_raw(data):
     result = {}; idx = 0
     while idx < len(data):
+        if idx >= len(data): break
         tag = data[idx]; idx += 1
         fn = tag >> 3; wt = tag & 0x07
         if wt == 0:
@@ -147,17 +145,25 @@ def get_login_data(jwt_token, open_id, access_token, platform):
     resp = requests.post(url, headers=headers, data=enc_payload, verify=False, timeout=10)
     if resp.status_code != 200:
         raise Exception(f"GetLoginData thất bại HTTP {resp.status_code}")
-    parsed = _parse_proto_raw(resp.content)
 
-    def _str(v):
-        if isinstance(v, bytes): return v.decode()
-        if isinstance(v, dict):  return v.get('data', '')
-        return str(v)
+    try:
+        import GetLoginData_res_pb2
+        res = GetLoginData_res_pb2.GetLoginDataRes()
+        res.ParseFromString(resp.content)
+        online_addr  = res.ip_port_online
+        whisper_addr = res.ip_port_chat if res.ip_port_chat else None
+    except:
+        parsed = _parse_proto_raw(resp.content)
+        def _str(v):
+            if isinstance(v, bytes): return v.decode()
+            if isinstance(v, dict):  return v.get('data', '')
+            return str(v)
+        online_addr  = _str(parsed.get(14, ''))
+        whisper_addr = _str(parsed.get(32, '')) if 32 in parsed else None
 
-    online_addr  = _str(parsed.get(14, ''))
-    whisper_addr = _str(parsed.get(32, '')) if 32 in parsed else None
     if not online_addr:
         raise Exception("Không tìm thấy địa chỉ game server")
+
     online_ip   = online_addr[:-6]
     online_port = int(online_addr[-5:])
     whisper_ip = whisper_port = None
@@ -185,62 +191,56 @@ def build_login_packet(jwt_token, key, iv, ts):
     return bytes.fromhex(header_hex) + enc_token
 
 def log(sid, level, message):
-    """Emit log to specific client"""
-    socketio.emit('log', {'level': level, 'message': message, 'time': datetime.now().strftime('%H:%M:%S')}, room=sid)
+    socketio.emit('log', {
+        'level': level,
+        'message': message,
+        'time': datetime.now().strftime('%H:%M:%S')
+    }, room=sid)
 
 def run_login_session(sid, access_token, stop_event):
-    def emit_log(level, msg):
-        log(sid, level, msg)
+    def L(level, msg): log(sid, level, msg)
 
     try:
-        emit_log('info', '🔍 Kiểm tra token...')
+        L('info', '🔍 Kiểm tra token...')
         open_id, platform = inspect_token(access_token)
-        emit_log('success', f'✅ Token OK | open_id={open_id} | platform={platform}')
+        L('success', f'✅ Token OK | open_id={open_id} | platform={platform}')
     except Exception as e:
-        emit_log('error', f'❌ {e}')
-        socketio.emit('session_ended', {}, room=sid)
-        return
+        L('error', f'❌ {e}'); socketio.emit('session_ended', {}, room=sid); return
 
     try:
-        emit_log('info', '🔐 MajorLogin...')
+        L('info', '🔐 MajorLogin...')
         jwt_token, key, iv, ts = major_login(open_id, access_token, platform)
-        emit_log('success', '✅ MajorLogin thành công')
+        L('success', '✅ MajorLogin thành công')
     except Exception as e:
-        emit_log('error', f'❌ {e}')
-        socketio.emit('session_ended', {}, room=sid)
-        return
+        L('error', f'❌ {e}'); socketio.emit('session_ended', {}, room=sid); return
 
     try:
-        emit_log('info', '🌐 GetLoginData...')
-        whisper_ip, whisper_port, online_ip, online_port = get_login_data(jwt_token, open_id, access_token, platform)
-        emit_log('success', f'✅ Game Server: {online_ip}:{online_port}')
+        L('info', '🌐 GetLoginData...')
+        whisper_ip, whisper_port, online_ip, online_port = get_login_data(
+            jwt_token, open_id, access_token, platform)
+        L('success', f'✅ Game Server: {online_ip}:{online_port}')
         if whisper_ip:
-            emit_log('success', f'✅ Whisper: {whisper_ip}:{whisper_port}')
+            L('success', f'✅ Whisper: {whisper_ip}:{whisper_port}')
     except Exception as e:
-        emit_log('error', f'❌ {e}')
-        socketio.emit('session_ended', {}, room=sid)
-        return
+        L('error', f'❌ {e}'); socketio.emit('session_ended', {}, room=sid); return
 
     try:
-        emit_log('info', '📦 Build packet...')
+        L('info', '📦 Build packet...')
         packet = build_login_packet(jwt_token, key, iv, ts)
-        emit_log('success', f'✅ Packet OK ({len(packet)} bytes)')
+        L('success', f'✅ Packet OK ({len(packet)} bytes)')
     except Exception as e:
-        emit_log('error', f'❌ {e}')
-        socketio.emit('session_ended', {}, room=sid)
-        return
+        L('error', f'❌ {e}'); socketio.emit('session_ended', {}, room=sid); return
 
-    # Whisper
     if whisper_ip and whisper_port:
         try:
             ws = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             ws.settimeout(5); ws.connect((whisper_ip, int(whisper_port)))
             ws.send(packet); time.sleep(0.5); ws.close()
-            emit_log('success', f'✅ Whisper sent → {whisper_ip}:{whisper_port}')
+            L('success', f'✅ Whisper sent → {whisper_ip}:{whisper_port}')
         except Exception as e:
-            emit_log('warn', f'⚠️ Whisper lỗi: {e}')
+            L('warn', f'⚠️ Whisper lỗi: {e}')
 
-    emit_log('info', f'🚀 Bắt đầu Login Loop → {online_ip}:{online_port}')
+    L('info', f'🚀 Bắt đầu Login Loop → {online_ip}:{online_port}')
     socketio.emit('loop_started', {'ip': online_ip, 'port': online_port}, room=sid)
 
     i = 0
@@ -253,26 +253,24 @@ def run_login_session(sid, access_token, stop_event):
             s.sendall(packet)
             try:
                 data = s.recv(4096)
-                emit_log('success', f'[{i}] ✅ Sent OK | Nhận {len(data)} bytes')
+                L('success', f'[{i}] ✅ Sent OK | Nhận {len(data)} bytes')
             except socket.timeout:
-                emit_log('cyan', f'[{i}] 📤 Sent OK | Không có response')
+                L('cyan', f'[{i}] 📤 Sent OK | Không có response')
             s.close()
         except Exception as e:
-            emit_log('error', f'[{i}] ❌ Lỗi: {e}')
+            L('error', f'[{i}] ❌ Lỗi: {e}')
         time.sleep(1.0)
 
-    emit_log('warn', '⛔ Session đã dừng.')
+    L('warn', '⛔ Session đã dừng.')
     socketio.emit('session_ended', {}, room=sid)
     if sid in active_sessions:
         del active_sessions[sid]
 
-# ── Token file ops
 def save_token(t): open(TOKEN_FILE, 'w').write(t.strip())
 def load_token(): return open(TOKEN_FILE).read().strip() if os.path.exists(TOKEN_FILE) else None
 def delete_token():
     if os.path.exists(TOKEN_FILE): os.remove(TOKEN_FILE)
 
-# ── Routes
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -287,7 +285,6 @@ def del_token():
     delete_token()
     return jsonify({'ok': True})
 
-# ── SocketIO events
 @socketio.on('connect')
 def on_connect():
     pass
@@ -297,7 +294,8 @@ def on_start(data):
     sid = request.sid
     token = data.get('token', '').strip()
     if not token:
-        emit('log', {'level': 'error', 'message': '❌ Token không được để trống', 'time': datetime.now().strftime('%H:%M:%S')})
+        emit('log', {'level': 'error', 'message': '❌ Token không được để trống',
+                     'time': datetime.now().strftime('%H:%M:%S')})
         return
     save_token(token)
     if sid in active_sessions:
@@ -313,7 +311,8 @@ def on_stop():
     sid = request.sid
     if sid in active_sessions:
         active_sessions[sid].set()
-        emit('log', {'level': 'warn', 'message': '⛔ Đang dừng session...', 'time': datetime.now().strftime('%H:%M:%S')})
+        emit('log', {'level': 'warn', 'message': '⛔ Đang dừng session...',
+                     'time': datetime.now().strftime('%H:%M:%S')})
 
 @socketio.on('disconnect')
 def on_disconnect():
@@ -323,5 +322,7 @@ def on_disconnect():
         del active_sessions[sid]
 
 if __name__ == '__main__':
+    from waitress import serve
     port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
+    print(f"Starting server on port {port}")
+    serve(app, host='0.0.0.0', port=port, threads=4)
