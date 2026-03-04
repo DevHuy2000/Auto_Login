@@ -3,7 +3,7 @@ services:
     name: freefire-login-tool
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn --config gunicorn_config.py app:app
     envVars:
       - key: PORT
         value: 10000
